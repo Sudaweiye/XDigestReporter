@@ -1,0 +1,20 @@
+{
+  "bearer_token": "",
+  "codex_cli_path": "codex.cmd",
+  "codex_model": "gpt-5.3-codex",
+  "monthly_budget_usd": 3.0,
+  "per_request_cost_usd": 0.01,
+  "daily_time": "09:00",
+  "accounts": [
+    "OpenAI",
+    "deepseek_ai",
+    "sama",
+    "karpathy"
+  ],
+  "selected_accounts": [
+    "OpenAI",
+    "deepseek_ai",
+    "sama",
+    "karpathy"
+  ]
+}

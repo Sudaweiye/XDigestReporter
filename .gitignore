@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Runtime data / outputs
+data/
+reports/
+*.log
+
+# Local config and secrets
+config.json
+**/config.json
+**/usage.json
+**/user_cache.json
+**/fetch_state.json
+*.env
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+_bat_debug.txt
