@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -45,6 +46,12 @@ class BudgetState:
     month: str
     used_usd: float
     request_count: int
+
+@dataclass
+class ReportArtifacts:
+    markdown_path: Path
+    tex_path: Path
+    pdf_path: Path
 
 class BudgetLimiter:
     def __init__(self, usage_path: Path, monthly_budget: float):
@@ -443,6 +450,228 @@ def load_fetch_state(day_label: str) -> Dict:
 def save_fetch_state(state: Dict) -> None:
     save_json_file(FETCH_STATE_PATH, state)
 
+def latex_escape(text: str) -> str:
+    raw = normalize_text(text)
+    if not raw:
+        return ""
+    escaped = []
+    mapping = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    for ch in raw:
+        if ord(ch) < 32 and ch not in ("\t", " "):
+            continue
+        escaped.append(mapping.get(ch, ch))
+    return "".join(escaped)
+
+def latex_or_na(text: str) -> str:
+    value = latex_escape(text)
+    return value if value else "暂无"
+
+def build_latex_document(
+    selected_accounts: List[str],
+    account_data: Dict[str, List[Dict]],
+    errors: Dict[str, str],
+    limiter: BudgetLimiter,
+    account_ai_results: Dict[str, Dict],
+    ai_errors: Dict[str, str],
+    global_ai: Optional[Dict],
+    day_label: str,
+    generated_at: str,
+) -> str:
+    total_tweets = sum(len(v) for v in account_data.values())
+    lines = [
+        r"\documentclass[11pt,a4paper]{ctexart}",
+        r"\usepackage[margin=2.2cm]{geometry}",
+        r"\usepackage{xcolor}",
+        r"\usepackage{hyperref}",
+        r"\usepackage{enumitem}",
+        r"\usepackage{fancyhdr}",
+        r"\usepackage{lastpage}",
+        r"\usepackage{tcolorbox}",
+        r"\usepackage{titlesec}",
+        r"\usepackage{setspace}",
+        r"\usepackage{draftwatermark}",
+        r"\definecolor{themeblue}{HTML}{0F4C81}",
+        r"\definecolor{themelight}{HTML}{F3F8FF}",
+        r"\SetWatermarkText{Jinge Guo專用}",
+        r"\SetWatermarkScale{0.30}",
+        r"\SetWatermarkColor[gray]{0.90}",
+        r"\SetWatermarkAngle{45}",
+        r"\titleformat{\section}{\Large\bfseries\color{themeblue}}{}{0em}{}",
+        r"\setstretch{1.25}",
+        r"\setlist[itemize]{leftmargin=*}",
+        r"\setlist[enumerate]{leftmargin=*}",
+        r"\pagestyle{fancy}",
+        r"\fancyhf{}",
+        r"\fancyhead[L]{XDigestReporter}",
+        rf"\fancyhead[R]{{{latex_escape(generated_at + ' ' + LOCAL_TZ_NAME)}}}",
+        r"\fancyfoot[C]{\thepage/\pageref{LastPage}}",
+        r"\begin{document}",
+        r"\begin{titlepage}",
+        r"\centering",
+        r"\vspace*{2.5cm}",
+        r"{\fontsize{30pt}{34pt}\selectfont\bfseries\color{themeblue}XDigestReporter}\\[0.8cm]",
+        rf"{{\Large\bfseries AI账号当日推文报告 ({latex_escape(day_label)})}}\\[1.2cm]",
+        r"\begin{tcolorbox}[width=0.86\textwidth,colback=themelight,colframe=themeblue!60!black,arc=2mm]",
+        rf"\textbf{{生成时间}}: {latex_escape(generated_at)} ({latex_escape(LOCAL_TZ_NAME)})\\",
+        rf"\textbf{{账号数量}}: {len(selected_accounts)}\\",
+        rf"\textbf{{当日推文总数}}: {total_tweets}\\",
+        rf"\textbf{{X API预算已用(估算)}}: \${limiter.state.used_usd:.4f} / \${limiter.monthly_budget:.2f}",
+        r"\end{tcolorbox}",
+        r"\vfill",
+        r"\end{titlepage}",
+        r"\tableofcontents",
+        r"\newpage",
+        r"\section{报告总览}",
+        rf"本报告覆盖日期为 \textbf{{{latex_escape(day_label)}}}，并使用本地时区 \textbf{{{latex_escape(LOCAL_TZ_NAME)}}} 进行统计。",
+    ]
+
+    if global_ai:
+        lines.append(r"\section{全局洞察}")
+        lines.append(r"\subsection*{全局核心热点}")
+        hotspots = global_ai.get("global_hotspots_cn", []) or []
+        if hotspots:
+            lines.append(r"\begin{itemize}")
+            for hot in hotspots:
+                lines.append(rf"\item {latex_or_na(str(hot))}")
+            lines.append(r"\end{itemize}")
+        else:
+            lines.append("暂无核心热点。")
+        lines.extend([
+            r"\subsection*{全局总结}",
+            latex_or_na(global_ai.get("global_summary_cn", "")),
+            r"\subsection*{全局评价}",
+            latex_or_na(global_ai.get("global_evaluation_cn", "")),
+        ])
+
+    for account in selected_accounts:
+        tweets = account_data.get(account, [])
+        err = errors.get(account)
+        ai_err = ai_errors.get(account)
+        ai = account_ai_results.get(account, {})
+        trans = {
+            str(x.get("id", "")): str(x.get("zh", ""))
+            for x in ai.get("translations", [])
+            if isinstance(x, dict)
+        }
+
+        lines.append(rf"\section{{@{latex_escape(account)}}}")
+        if err:
+            lines.append(
+                rf"\begin{{tcolorbox}}[colback=red!4!white,colframe=red!60!black,title=状态]\textbf{{抓取失败}}: {latex_or_na(err)}\end{{tcolorbox}}"
+            )
+            continue
+        if not tweets:
+            lines.append(
+                r"\begin{tcolorbox}[colback=yellow!5!white,colframe=yellow!40!black,title=状态]未更新推文\end{tcolorbox}"
+            )
+            continue
+
+        hotspots = ai.get("hotspots_cn", []) or []
+        lines.append(r"\begin{tcolorbox}[colback=themelight,colframe=themeblue!60!black,title=账号洞察,arc=2mm]")
+        lines.append(rf"\textbf{{当日推文数}}: {len(tweets)}\\")
+        if ai_err:
+            lines.append(rf"\textbf{{AI处理失败}}: {latex_or_na(ai_err)}\\")
+        lines.append(rf"\textbf{{AI总结}}: {latex_or_na(ai.get('summary_cn', ''))}\\")
+        lines.append(rf"\textbf{{AI评价}}: {latex_or_na(ai.get('evaluation_cn', ''))}\\")
+        lines.append(
+            rf"\textbf{{账号核心热点}}: {latex_or_na('；'.join(str(x) for x in hotspots) if hotspots else '暂无')}"
+        )
+        lines.append(r"\end{tcolorbox}")
+        lines.append(r"\subsection*{推文原文与简体中文翻译}")
+        lines.append(r"\begin{enumerate}[label=\arabic*., itemsep=0.9em]")
+        for t in tweets:
+            tid = str(t.get("id", ""))
+            raw = normalize_text(t.get("text", ""))
+            zh = normalize_text(trans.get(tid, "")) or "(翻译缺失)"
+            lines.append(r"\item")
+            lines.append(rf"\textbf{{时间}}: {latex_or_na(format_tweet_time(t.get('created_at', '')))}\\")
+            lines.append(rf"\textbf{{原文}}: {latex_or_na(raw)}\\")
+            lines.append(rf"\textbf{{中文}}: {latex_or_na(zh)}")
+        lines.append(r"\end{enumerate}")
+
+    lines.append(r"\end{document}")
+    return "\n".join(lines) + "\n"
+
+def compile_latex_pdf(tex_path: Path) -> Path:
+    pdf_path = tex_path.with_suffix(".pdf")
+    compiler_errors: List[str] = []
+
+    def run_compiler(cmd: List[str], retries: int = 1) -> bool:
+        for _ in range(retries):
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(ROOT),
+            )
+            if proc.returncode != 0:
+                tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-30:]
+                compiler_errors.append("\n".join(tail))
+                return False
+        return True
+
+    out_dir = str(tex_path.parent)
+    compilers: List[Tuple[List[str], int]] = []
+    if shutil.which("xelatex"):
+        compilers.append((
+            [
+                "xelatex",
+                "-interaction=nonstopmode",
+                "-halt-on-error",
+                "-output-directory",
+                out_dir,
+                str(tex_path),
+            ],
+            2,
+        ))
+    if shutil.which("latexmk"):
+        compilers.append((
+            [
+                "latexmk",
+                "-xelatex",
+                "-interaction=nonstopmode",
+                "-halt-on-error",
+                f"-output-directory={out_dir}",
+                str(tex_path),
+            ],
+            1,
+        ))
+    if shutil.which("tectonic"):
+        compilers.append((
+            [
+                "tectonic",
+                "--keep-logs",
+                "--keep-intermediates",
+                "--outdir",
+                out_dir,
+                str(tex_path),
+            ],
+            1,
+        ))
+
+    if not compilers:
+        raise RuntimeError("未检测到 LaTeX 编译器，请安装 TeX Live 并确保 xelatex 在 PATH 中。")
+
+    for cmd, retries in compilers:
+        if run_compiler(cmd, retries=retries) and pdf_path.exists():
+            return pdf_path
+
+    detail = compiler_errors[-1] if compiler_errors else "未知编译错误"
+    raise RuntimeError(f"LaTeX 编译失败，无法生成 PDF。\n{detail}")
+
 def build_report(
     selected_accounts: List[str],
     account_data: Dict[str, List[Dict]],
@@ -452,8 +681,13 @@ def build_report(
     ai_errors: Dict[str, str],
     global_ai: Optional[Dict],
     day_label: str,
-) -> Path:
-    path = REPORT_DIR / f"x_digest_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.md"
+) -> ReportArtifacts:
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    generated_at = datetime.now(ZoneInfo(LOCAL_TZ_NAME)).strftime("%Y-%m-%d %H:%M:%S")
+    base_name = f"x_digest_{stamp}"
+    md_path = REPORT_DIR / f"{base_name}.md"
+    tex_path = REPORT_DIR / f"{base_name}.tex"
+
     lines = [
         f"# AI账号当日推文报告 ({day_label})",
         "",
@@ -512,8 +746,21 @@ def build_report(
             lines.append(f"     中文: {zh}")
         lines.append("")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    tex_content = build_latex_document(
+        selected_accounts=selected_accounts,
+        account_data=account_data,
+        errors=errors,
+        limiter=limiter,
+        account_ai_results=account_ai_results,
+        ai_errors=ai_errors,
+        global_ai=global_ai,
+        day_label=day_label,
+        generated_at=generated_at,
+    )
+    tex_path.write_text(tex_content, encoding="utf-8")
+    pdf_path = compile_latex_pdf(tex_path)
+    return ReportArtifacts(markdown_path=md_path, tex_path=tex_path, pdf_path=pdf_path)
 
 def create_or_update_task(task_time: str, run_target: Path) -> None:
     hhmm = task_time.strip()
@@ -527,7 +774,7 @@ def create_or_update_task(task_time: str, run_target: Path) -> None:
 def remove_task() -> None:
     subprocess.run(f'schtasks /Delete /TN "{TASK_NAME}" /F', shell=True, capture_output=True, text=True)
 
-def execute_digest_job(cfg: Dict, logger: Callable[[str], None]) -> Path:
+def execute_digest_job(cfg: Dict, logger: Callable[[str], None]) -> ReportArtifacts:
     token = cfg.get("bearer_token", "").strip()
     selected = cfg.get("selected_accounts", [])
     if not token:
@@ -825,13 +1072,18 @@ class App:
         cfg = load_config()
         logger = (lambda m: self.log(m)) if not headless else (lambda _: None)
         try:
-            report = execute_digest_job(cfg, logger)
-            logger(f"报告已生成: {report}")
+            artifacts = execute_digest_job(cfg, logger)
+            logger(f"Markdown 已生成: {artifacts.markdown_path}")
+            logger(f"LaTeX 源文件已生成: {artifacts.tex_path}")
+            logger(f"PDF 已生成: {artifacts.pdf_path}")
             if not headless:
-                messagebox.showinfo("完成", f"报告生成成功：\n{report}")
+                messagebox.showinfo(
+                    "完成",
+                    f"报告生成成功：\nMD: {artifacts.markdown_path}\nPDF: {artifacts.pdf_path}",
+                )
             if getattr(sys, "frozen", False):
                 try:
-                    os.startfile(str(report))
+                    os.startfile(str(artifacts.pdf_path))
                 except Exception:
                     pass
         except Exception as e:
@@ -866,9 +1118,9 @@ class App:
 
 def run_headless_once() -> int:
     try:
-        report = execute_digest_job(load_config(), lambda _: None)
+        artifacts = execute_digest_job(load_config(), lambda _: None)
         try:
-            os.startfile(str(report))
+            os.startfile(str(artifacts.pdf_path))
         except Exception:
             pass
         return 0
