@@ -24,6 +24,7 @@ DEFAULT_PER_REQUEST_COST = 0.01
 DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 DEFAULT_CODEX_CLI = "codex.cmd"
 LOCAL_TZ_NAME = "Asia/Shanghai"
+PDF_WATERMARK_TEXT = "Jinge Guo專用"
 
 DEFAULT_ACCOUNTS = [
     "OpenAI", "GoogleDeepMind", "nvidia", "NVIDIAAI", "AnthropicAI", "MetaAI", "deepseek_ai",
@@ -503,7 +504,7 @@ def build_latex_document(
         r"\usepackage{draftwatermark}",
         r"\definecolor{themeblue}{HTML}{0F4C81}",
         r"\definecolor{themelight}{HTML}{F3F8FF}",
-        r"\SetWatermarkText{Jinge Guo專用}",
+        rf"\SetWatermarkText{{{latex_escape(PDF_WATERMARK_TEXT)}}}",
         r"\SetWatermarkScale{0.30}",
         r"\SetWatermarkColor[gray]{0.90}",
         r"\SetWatermarkAngle{45}",
